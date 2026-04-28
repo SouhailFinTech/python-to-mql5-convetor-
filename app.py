@@ -2,7 +2,11 @@ import streamlit as st
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Fix path for both local and Streamlit Cloud
+ROOT = os.path.dirname(os.path.abspath(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
 from core.converter import PY2MQL5Converter
 
 # ─── PAGE CONFIG ───────────────────────────────────────────────────
