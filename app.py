@@ -1,6 +1,7 @@
 """
 PY2MQL5 — Python to MQL5 Converter
-Single-file version — guaranteed to work on Streamlit Cloud
+Single-file version — Streamlit Cloud ready
+Hybrid: Dictionary (deterministic) + Groq AI (edge cases only)
 """
 
 import streamlit as st
@@ -10,30 +11,60 @@ import json
 from typing import Optional
 
 # ═══════════════════════════════════════════════════════════════════
-# INDICATOR MAP — hardcoded knowledge layer
+# INDICATOR MAP — your moat. Deterministic. Zero AI. Always correct.
 # ═══════════════════════════════════════════════════════════════════
 
 INDICATOR_MAP = {
-    "ta.sma":    {"mql5_func": "iMA",         "ma_method": "MODE_SMA",  "params": ["period"], "buffer": 0, "handle_required": True,  "aliases": ["SMA", "sma", "rolling_mean", "simple_moving_average"]},
-    "ta.ema":    {"mql5_func": "iMA",         "ma_method": "MODE_EMA",  "params": ["period"], "buffer": 0, "handle_required": True,  "aliases": ["EMA", "ema", "ewm_mean", "exponential_moving_average"]},
-    "ta.wma":    {"mql5_func": "iMA",         "ma_method": "MODE_LWMA", "params": ["period"], "buffer": 0, "handle_required": True,  "aliases": ["WMA", "wma"]},
-    "ta.dema":   {"mql5_func": "iMA",         "ma_method": "MODE_DEMA", "params": ["period"], "buffer": 0, "handle_required": True,  "aliases": ["DEMA", "dema"]},
-    "ta.tema":   {"mql5_func": "iMA",         "ma_method": "MODE_TEMA", "params": ["period"], "buffer": 0, "handle_required": True,  "aliases": ["TEMA", "tema"]},
-    "ta.rsi":    {"mql5_func": "iRSI",        "params": ["period"],     "buffer": 0,          "handle_required": True,               "aliases": ["RSI", "rsi", "relative_strength_index"]},
-    "ta.macd":   {"mql5_func": "iMACD",       "params": ["fast_period", "slow_period", "signal_period"], "buffers": {"macd": 0, "signal": 1, "histogram": 2}, "handle_required": True, "aliases": ["MACD", "macd"]},
-    "ta.stoch":  {"mql5_func": "iStochastic", "params": ["k_period", "d_period", "slowing"], "buffers": {"k": 0, "d": 1}, "handle_required": True, "aliases": ["STOCH", "stoch", "stochastic"]},
-    "ta.bbands": {"mql5_func": "iBands",      "params": ["period", "deviation"], "buffers": {"upper": 1, "mid": 0, "lower": 2}, "handle_required": True, "aliases": ["BBANDS", "bbands", "bollinger", "BollingerBands"]},
-    "ta.atr":    {"mql5_func": "iATR",        "params": ["period"],     "buffer": 0,          "handle_required": True,               "aliases": ["ATR", "atr", "average_true_range"]},
-    "ta.adx":    {"mql5_func": "iADX",        "params": ["period"],     "buffers": {"adx": 0, "plus_di": 1, "minus_di": 2}, "handle_required": True, "aliases": ["ADX", "adx"]},
-    "ta.cci":    {"mql5_func": "iCCI",        "params": ["period"],     "buffer": 0,          "handle_required": True,               "aliases": ["CCI", "cci"]},
-    "ta.mfi":    {"mql5_func": "iMFI",        "params": ["period"],     "buffer": 0,          "handle_required": True,               "aliases": ["MFI", "mfi"]},
-    "ta.mom":    {"mql5_func": "iMomentum",   "params": ["period"],     "buffer": 0,          "handle_required": True,               "aliases": ["MOM", "mom", "momentum"]},
-    "ta.willr":  {"mql5_func": "iWPR",        "params": ["period"],     "buffer": 0,          "handle_required": True,               "aliases": ["WILLR", "willr", "williams"]},
-    "ta.obv":    {"mql5_func": "iOBV",        "params": [],             "buffer": 0,          "handle_required": True,               "aliases": ["OBV", "obv"]},
-    "ta.ad":     {"mql5_func": "iAD",         "params": [],             "buffer": 0,          "handle_required": True,               "aliases": ["AD", "ad"]},
-    "ta.donchian":{"mql5_func": "iHighest",   "params": ["period"],     "buffer": 0,          "handle_required": False,              "aliases": ["donchian", "DC", "dc"]},
+    # ── Moving Averages ─────────────────────────────────────────────
+    "ta.sma":      {"mql5_func": "iMA", "ma_method": "MODE_SMA",  "params": ["period"], "buffer": 0, "handle_required": True,
+                    "aliases": ["sma", "SMA", "rolling_mean", "simple_moving_average"]},
+    "ta.ema":      {"mql5_func": "iMA", "ma_method": "MODE_EMA",  "params": ["period"], "buffer": 0, "handle_required": True,
+                    "aliases": ["ema", "EMA", "ewm_mean", "exponential_moving_average"]},
+    "ta.wma":      {"mql5_func": "iMA", "ma_method": "MODE_LWMA", "params": ["period"], "buffer": 0, "handle_required": True,
+                    "aliases": ["wma", "WMA"]},
+    "ta.dema":     {"mql5_func": "iMA", "ma_method": "MODE_DEMA", "params": ["period"], "buffer": 0, "handle_required": True,
+                    "aliases": ["dema", "DEMA"]},
+    "ta.tema":     {"mql5_func": "iMA", "ma_method": "MODE_TEMA", "params": ["period"], "buffer": 0, "handle_required": True,
+                    "aliases": ["tema", "TEMA"]},
+    # ── Oscillators ─────────────────────────────────────────────────
+    "ta.rsi":      {"mql5_func": "iRSI",        "params": ["period"], "buffer": 0, "handle_required": True,
+                    "aliases": ["rsi", "RSI", "relative_strength_index"]},
+    "ta.macd":     {"mql5_func": "iMACD",       "params": ["fast_period","slow_period","signal_period"],
+                    "buffers": {"macd": 0, "signal": 1, "histogram": 2}, "handle_required": True,
+                    "aliases": ["macd", "MACD"]},
+    "ta.stoch":    {"mql5_func": "iStochastic", "params": ["k_period","d_period","slowing"],
+                    "buffers": {"k": 0, "d": 1}, "handle_required": True,
+                    "aliases": ["stoch", "STOCH", "stochastic"]},
+    "ta.cci":      {"mql5_func": "iCCI",        "params": ["period"], "buffer": 0, "handle_required": True,
+                    "aliases": ["cci", "CCI"]},
+    "ta.adx":      {"mql5_func": "iADX",        "params": ["period"],
+                    "buffers": {"adx": 0, "plus_di": 1, "minus_di": 2}, "handle_required": True,
+                    "aliases": ["adx", "ADX"]},
+    "ta.mfi":      {"mql5_func": "iMFI",        "params": ["period"], "buffer": 0, "handle_required": True,
+                    "aliases": ["mfi", "MFI"]},
+    "ta.mom":      {"mql5_func": "iMomentum",   "params": ["period"], "buffer": 0, "handle_required": True,
+                    "aliases": ["mom", "MOM", "momentum"]},
+    "ta.willr":    {"mql5_func": "iWPR",        "params": ["period"], "buffer": 0, "handle_required": True,
+                    "aliases": ["willr", "WILLR", "williams"]},
+    "ta.roc":      {"mql5_func": "iRoC",        "params": ["period"], "buffer": 0, "handle_required": True,
+                    "aliases": ["roc", "ROC"]},
+    # ── Volatility ──────────────────────────────────────────────────
+    "ta.bbands":   {"mql5_func": "iBands", "params": ["period","deviation"],
+                    "buffers": {"upper": 1, "mid": 0, "lower": 2}, "handle_required": True,
+                    "aliases": ["bbands", "BBANDS", "bb", "bollinger", "BollingerBands"]},
+    "ta.atr":      {"mql5_func": "iATR",   "params": ["period"], "buffer": 0, "handle_required": True,
+                    "aliases": ["atr", "ATR", "average_true_range"]},
+    # ── Volume ──────────────────────────────────────────────────────
+    "ta.obv":      {"mql5_func": "iOBV",  "params": [], "buffer": 0, "handle_required": True,
+                    "aliases": ["obv", "OBV"]},
+    "ta.ad":       {"mql5_func": "iAD",   "params": [], "buffer": 0, "handle_required": True,
+                    "aliases": ["ad", "AD"]},
+    # ── Price / Channels ────────────────────────────────────────────
+    "ta.donchian": {"mql5_func": "iHighest", "params": ["period"], "buffer": 0, "handle_required": False,
+                    "aliases": ["donchian", "dc", "DC"]},
 }
 
+# ── Handle init templates (hardcoded — never wrong) ──────────────
 HANDLE_INIT_MAP = {
     "iRSI":        "handle_{name} = iRSI(_Symbol, _Period, {p1}, PRICE_CLOSE);",
     "iMA":         "handle_{name} = iMA(_Symbol, _Period, {p1}, 0, {method}, PRICE_CLOSE);",
@@ -47,6 +78,8 @@ HANDLE_INIT_MAP = {
     "iMomentum":   "handle_{name} = iMomentum(_Symbol, _Period, {p1}, PRICE_CLOSE);",
     "iWPR":        "handle_{name} = iWPR(_Symbol, _Period, {p1});",
     "iOBV":        "handle_{name} = iOBV(_Symbol, _Period, VOLUME_TICK);",
+    "iAD":         "handle_{name} = iAD(_Symbol, _Period, VOLUME_TICK);",
+    "iRoC":        "handle_{name} = iRoC(_Symbol, _Period, {p1}, PRICE_CLOSE);",
 }
 
 PATTERN_KEYWORDS = {
@@ -54,14 +87,16 @@ PATTERN_KEYWORDS = {
     "crossunder": ["crossunder", "cross_below", "crossed_below"],
     "overbought": ["overbought", "> 70", ">70", "> 80", "> 75"],
     "oversold":   ["oversold",   "< 30", "<30", "< 20", "< 25"],
-    "new_bar":    ["new_bar", "is_new_candle", "new_candle"],
 }
 
+# MA-type indicators that can appear as fast/slow pairs
+MA_TYPES = {"ema", "sma", "wma", "dema", "tema"}
+
 # ═══════════════════════════════════════════════════════════════════
-# EA TEMPLATE
+# EA TEMPLATE — always structurally correct
 # ═══════════════════════════════════════════════════════════════════
 
-EA_TEMPLATE = '''//+------------------------------------------------------------------+
+EA_TEMPLATE = """//+------------------------------------------------------------------+
 //|  {ea_name}.mq5                                                   |
 //|  Auto-generated by PY2MQL5 Converter                            |
 //|  https://py2mql5.streamlit.app                                   |
@@ -116,6 +151,10 @@ void OnTick()
    //--- Current values  [0]=current bar  [1]=previous bar
 {current_values}
 
+   //--- Close price via native MQL5 (no buffer needed) — BUG 1 FIX
+   double close_price = iClose(_Symbol, _Period, 0);
+   double close_prev  = iClose(_Symbol, _Period, 1);
+
    //--- Check position status
    bool in_position = PositionSelect(_Symbol);
 
@@ -138,7 +177,7 @@ bool IsNewBar()
   }}
 
 //+------------------------------------------------------------------+
-//| Stop Loss price                                                   |
+//| Stop Loss price (ATR-based)                                       |
 //+------------------------------------------------------------------+
 double CalcSL(bool is_buy, double atr_val, double mult=1.5)
   {{
@@ -149,7 +188,7 @@ double CalcSL(bool is_buy, double atr_val, double mult=1.5)
   }}
 
 //+------------------------------------------------------------------+
-//| Take Profit price                                                 |
+//| Take Profit price (ATR-based)                                     |
 //+------------------------------------------------------------------+
 double CalcTP(bool is_buy, double atr_val, double mult=3.0)
   {{
@@ -158,7 +197,7 @@ double CalcTP(bool is_buy, double atr_val, double mult=3.0)
    double dist  = atr_val * mult * _Point * MathPow(10, Digits() % 2);
    return is_buy ? price + dist : price - dist;
   }}
-'''
+"""
 
 # ═══════════════════════════════════════════════════════════════════
 # CONVERTER ENGINE
@@ -166,14 +205,15 @@ double CalcTP(bool is_buy, double atr_val, double mult=3.0)
 
 class ConversionResult:
     def __init__(self):
-        self.mql5_code          = ""
-        self.confidence         = 0
-        self.errors             = []
-        self.warnings           = []
+        self.mql5_code           = ""
+        self.confidence          = 0
+        self.errors              = []
+        self.warnings            = []
         self.detected_indicators = []
-        self.detected_patterns  = []
-        self.ai_used            = False
-        self.notes              = []
+        self.detected_patterns   = []
+        self.ai_used             = False
+        self.notes               = []
+        self.unknown_indicators  = []
 
 
 class PY2MQL5Converter:
@@ -187,7 +227,7 @@ class PY2MQL5Converter:
             except Exception:
                 pass
 
-    # ── MAIN ENTRY ─────────────────────────────────────────────────
+    # ── MAIN ───────────────────────────────────────────────────────
     def convert(self, python_code: str, ea_name: str = "MyEA") -> ConversionResult:
         result = ConversionResult()
         try:
@@ -196,34 +236,57 @@ class PY2MQL5Converter:
                 ast.parse(python_code)
             except SyntaxError as e:
                 result.errors.append(f"Python syntax error: {e}")
-                result.confidence = 0
                 return result
 
-            # 2. Detect indicators & patterns
+            # 2. Detect everything
             indicators = self._detect_indicators(python_code)
             patterns   = self._detect_patterns(python_code)
+            unknown    = self._detect_unknown(python_code, indicators)
             result.detected_indicators = indicators
             result.detected_patterns   = patterns
+            result.unknown_indicators  = unknown
 
-            # 3. Build each section
-            handle_decls = self._build_handle_declarations(indicators)
+            # 3. Build from dictionary (deterministic layer)
+            handle_decls = self._build_handle_decls(indicators)
             handle_inits = self._build_handle_inits(indicators)
             handle_vals  = self._build_handle_validations(indicators)
             handle_rels  = self._build_handle_releases(indicators)
             copy_bufs    = self._build_copy_buffers(indicators)
             cur_vals     = self._build_current_values(indicators)
             input_params = self._build_input_params(indicators)
-            entry_logic  = self._build_entry_logic(python_code, patterns, indicators)
-            exit_logic   = self._build_exit_logic(python_code, patterns, indicators)
+            entry_logic  = self._build_entry(python_code, patterns, indicators)
+            exit_logic   = self._build_exit()
 
-            # 4. Groq for ambiguous logic
-            if "// TODO" in entry_logic and self.groq_client:
-                ai = self._groq_translate(python_code, indicators, patterns)
-                if ai:
-                    entry_logic  = ai.get("entry", entry_logic)
-                    exit_logic   = ai.get("exit",  exit_logic)
-                    result.ai_used = True
-                    result.notes.append("Groq AI assisted with entry/exit translation")
+            # 4. Groq fills gaps ONLY when needed (hybrid layer)
+            needs_groq = ("// TODO" in entry_logic) or (len(unknown) > 0)
+            if needs_groq:
+                if self.groq_client:
+                    ai = self._groq_fill(python_code, indicators, patterns, unknown)
+                    if ai:
+                        if "// TODO" in entry_logic:
+                            entry_logic = ai.get("entry", entry_logic)
+                            exit_logic  = ai.get("exit",  exit_logic)
+                        if unknown and "custom_indicators" in ai:
+                            ci = ai["custom_indicators"]
+                            if ci.get("declarations"): handle_decls += "\n" + ci["declarations"]
+                            if ci.get("init"):          handle_inits += "\n" + ci["init"]
+                            if ci.get("buffers"):       copy_bufs    += "\n" + ci["buffers"]
+                            if ci.get("values"):        cur_vals     += "\n" + ci["values"]
+                        result.ai_used = True
+                        parts = []
+                        if "// TODO" in entry_logic: parts.append("entry/exit logic")
+                        if unknown: parts.append(f"unknown: {unknown}")
+                        result.notes.append(f"Groq AI assisted with: {', '.join(parts)}")
+                else:
+                    # No Groq key — be explicit about what's missing
+                    if unknown:
+                        result.warnings.append(
+                            f"Unknown indicators: {unknown} — add Groq API key for AI translation"
+                        )
+                    if "// TODO" in entry_logic:
+                        result.warnings.append(
+                            "Entry pattern not in dictionary — add Groq API key for AI translation"
+                        )
 
             # 5. Assemble
             result.mql5_code = EA_TEMPLATE.format(
@@ -239,44 +302,99 @@ class PY2MQL5Converter:
                 exit_logic          = exit_logic,
             )
 
-            # 6. Validate & score
+            # 6. Validate + score
             self._validate(result)
-            result.confidence = self._score(indicators, patterns, result)
+            result.confidence = self._score(indicators, patterns, result, unknown)
 
         except Exception as e:
             result.errors.append(f"Unexpected error: {e}")
-            result.confidence = 0
 
         return result
 
     # ── DETECTION ──────────────────────────────────────────────────
     def _detect_indicators(self, code: str) -> list:
+        """
+        BUG 2 FIX: detect ema_fast/ema_slow as two separate MA handles.
+        When multiple assignments to same indicator type found,
+        each gets its own handle with correct period.
+        """
         detected = []
-        seen     = set()
-        cl       = code.lower()
+        seen_keys = set()
+        cl = code.lower()
+
         for key, info in INDICATOR_MAP.items():
-            terms = [key.split(".")[-1].lower()] + [a.lower() for a in info.get("aliases", [])]
+            base = key.split(".")[-1].lower()
+            terms = [base] + [a.lower() for a in info.get("aliases", [])]
+
             for term in terms:
-                if term in cl and key not in seen:
-                    seen.add(key)
-                    params = self._extract_params(code, term, info)
+                if term not in cl:
+                    continue
+
+                # MA types: check for fast/slow pattern
+                if base in MA_TYPES:
+                    # Match: var_name = ta.ema(close, length=N) or ta.ema(close, N)
+                    assigns = re.findall(
+                        rf'(\w+)\s*=\s*(?:ta\.)?{re.escape(term)}\s*\([^)]+?(?:length\s*=\s*)?(\d+)\s*[,)]',
+                        code, re.IGNORECASE
+                    )
+                    unique_assigns = list(dict.fromkeys(assigns))  # preserve order, dedup
+
+                    if len(unique_assigns) >= 2:
+                        # Multiple MAs detected — each gets its own handle
+                        for var_name, period in unique_assigns:
+                            safe = re.sub(r'[^a-z0-9_]', '_', var_name.lower())
+                            uid  = f"{key}_{safe}"
+                            if uid not in seen_keys:
+                                seen_keys.add(uid)
+                                detected.append({
+                                    "key":        key,
+                                    "name":       safe,
+                                    "info":       info,
+                                    "params":     {"period": int(period)},
+                                    "is_multi":   True,
+                                })
+                        break
+
+                # Single detection
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    params = self._extract_params(code, term, info, base)
                     detected.append({
-                        "key":  key,
-                        "name": key.split(".")[-1].lower(),
-                        "info": info,
-                        "params": params,
+                        "key":      key,
+                        "name":     base,
+                        "info":     info,
+                        "params":   params,
+                        "is_multi": False,
                     })
                     break
+
         return detected
 
-    def _extract_params(self, code: str, indicator: str, info: dict) -> dict:
+    def _detect_unknown(self, code: str, known: list) -> list:
+        """Find ta.XXX calls not in our dictionary."""
+        known_bases = {i["key"].split(".")[-1].lower() for i in known}
+        found = []
+        for call in re.findall(r'ta\.([a-z_]+)\s*\(', code, re.IGNORECASE):
+            c = call.lower()
+            if c not in known_bases and c not in found:
+                found.append(c)
+        return found
+
+    def _extract_params(self, code: str, indicator: str, info: dict, base: str) -> dict:
         p = {}
-        # Generic period
+
+        # BUG 3 FIX: ATR always gets its own period — never inherits from other indicators
+        if base == "atr":
+            m = re.search(r'atr\s*\([^)]*?(?:length\s*=\s*)?(\d+)\s*[,)]', code, re.IGNORECASE)
+            p["period"] = int(m.group(1)) if m else 14
+            return p
+
+        # Generic period extraction
         for pat in [
-            rf'{indicator}\s*\([^,)]+,\s*(\d+)',
-            rf'{indicator}_period\s*=\s*(\d+)',
-            r'period\s*=\s*(\d+)',
+            rf'{re.escape(indicator)}\s*\([^,)]+,\s*(?:length\s*=\s*)?(\d+)',
+            rf'{re.escape(indicator)}_period\s*=\s*(\d+)',
             r'length\s*=\s*(\d+)',
+            r'period\s*=\s*(\d+)',
         ]:
             m = re.search(pat, code, re.IGNORECASE)
             if m:
@@ -286,7 +404,7 @@ class PY2MQL5Converter:
             p["period"] = 14
 
         # MACD
-        if "macd" in indicator.lower():
+        if base == "macd":
             p.update({"fast": 12, "slow": 26, "signal": 9})
             m = re.search(r'macd[^(]*\([^,)]+,\s*(\d+)[^,]*,\s*(\d+)[^,]*,\s*(\d+)', code, re.IGNORECASE)
             if m:
@@ -295,34 +413,36 @@ class PY2MQL5Converter:
                 p["signal"] = int(m.group(3))
 
         # Bollinger
-        if any(x in indicator.lower() for x in ["bband", "bb"]):
+        if base in ["bbands", "bb"]:
             p["deviation"] = 2.0
             m = re.search(r'std\s*=\s*([\d.]+)', code)
-            if m:
-                p["deviation"] = float(m.group(1))
+            if m: p["deviation"] = float(m.group(1))
 
         # Stochastic
-        if "stoch" in indicator.lower():
+        if base == "stoch":
             p.update({"k_period": 14, "d_period": 3, "slowing": 3})
 
         return p
 
     def _detect_patterns(self, code: str) -> list:
-        cl       = code.lower()
+        cl = code.lower()
         detected = []
         for pat, kws in PATTERN_KEYWORDS.items():
             if any(k in cl for k in kws):
                 detected.append(pat)
-        if any(w in cl for w in ["buy(", "long(", "enter_long", "go_long", "buy_signal"]):
+        if any(w in cl for w in ["buy(", "long(", "enter_long", "go_long"]):
             detected.append("has_long")
-        if any(w in cl for w in ["sell(", "short(", "enter_short", "go_short", "sell_signal"]):
+        if any(w in cl for w in ["sell(", "short(", "enter_short", "go_short"]):
             detected.append("has_short")
+        # Detect crossover from fast/slow variable names even without keyword
+        if re.search(r'(fast|slow|short|long)\w*\s*=\s*(?:ta\.)?(?:ema|sma|wma)', cl):
+            if "crossover" not in detected:
+                detected.append("crossover")
         return list(set(detected))
 
-    # ── BUILD SECTIONS ─────────────────────────────────────────────
-    def _build_handle_declarations(self, indicators: list) -> str:
-        seen  = set()
-        lines = []
+    # ── BUILD SECTIONS (dictionary layer) ──────────────────────────
+    def _build_handle_decls(self, indicators: list) -> str:
+        seen, lines = set(), []
         for ind in indicators:
             n = ind["name"]
             if n not in seen and ind["info"].get("handle_required", True):
@@ -331,8 +451,7 @@ class PY2MQL5Converter:
         return "\n".join(lines) or "// No indicator handles"
 
     def _build_handle_inits(self, indicators: list) -> str:
-        seen  = set()
-        lines = []
+        seen, lines = set(), []
         for ind in indicators:
             n    = ind["name"]
             info = ind["info"]
@@ -344,37 +463,37 @@ class PY2MQL5Converter:
             tpl = HANDLE_INIT_MAP[func]
             try:
                 if func == "iMA":
-                    line = tpl.format(name=n, p1=p.get("period", 14), method=info.get("ma_method", "MODE_SMA"))
+                    line = tpl.format(name=n, p1=p.get("period",14), method=info.get("ma_method","MODE_SMA"))
                 elif func == "iMACD":
-                    line = tpl.format(name=n, p1=p.get("fast", 12), p2=p.get("slow", 26), p3=p.get("signal", 9))
+                    line = tpl.format(name=n, p1=p.get("fast",12), p2=p.get("slow",26), p3=p.get("signal",9))
                 elif func == "iBands":
-                    line = tpl.format(name=n, p1=p.get("period", 20), p2=p.get("deviation", 2.0))
+                    line = tpl.format(name=n, p1=p.get("period",20), p2=p.get("deviation",2.0))
                 elif func == "iStochastic":
-                    line = tpl.format(name=n, p1=p.get("k_period", 14), p2=p.get("d_period", 3), p3=p.get("slowing", 3))
+                    line = tpl.format(name=n, p1=p.get("k_period",14), p2=p.get("d_period",3), p3=p.get("slowing",3))
                 else:
-                    line = tpl.format(name=n, p1=p.get("period", 14))
+                    line = tpl.format(name=n, p1=p.get("period",14))
                 lines.append(f"   {line}")
             except Exception:
                 lines.append(f"   // TODO: manually init handle_{n}")
         return "\n".join(lines) or "   // No handles to init"
 
     def _build_handle_validations(self, indicators: list) -> str:
-        seen  = set()
-        lines = []
+        seen, lines = set(), []
         for ind in indicators:
             n = ind["name"]
             if n not in seen and ind["info"].get("handle_required", True):
-                lines.append(f"""   if(handle_{n} == INVALID_HANDLE)
-     {{
-      Print("Failed to create {n} handle. Error: ", GetLastError());
-      return(INIT_FAILED);
-     }}""")
+                lines.append(
+                    f"   if(handle_{n} == INVALID_HANDLE)\n"
+                    f"     {{\n"
+                    f"      Print(\"Failed to create {n} handle. Error: \", GetLastError());\n"
+                    f"      return(INIT_FAILED);\n"
+                    f"     }}"
+                )
                 seen.add(n)
         return "\n".join(lines) or "   // No handles to validate"
 
     def _build_handle_releases(self, indicators: list) -> str:
-        seen  = set()
-        lines = []
+        seen, lines = set(), []
         for ind in indicators:
             n = ind["name"]
             if n not in seen and ind["info"].get("handle_required", True):
@@ -383,8 +502,7 @@ class PY2MQL5Converter:
         return "\n".join(lines) or "   // No handles to release"
 
     def _build_copy_buffers(self, indicators: list) -> str:
-        seen  = set()
-        lines = []
+        seen, lines = set(), []
         for ind in indicators:
             n    = ind["name"]
             info = ind["info"]
@@ -394,21 +512,24 @@ class PY2MQL5Converter:
             if "buffers" in info:
                 for buf_name, buf_idx in info["buffers"].items():
                     var = f"{n}_{buf_name}"
-                    lines.append(f"""   double {var}_buf[];
-   ArraySetAsSeries({var}_buf, true);
-   if(CopyBuffer(handle_{n}, {buf_idx}, 0, 3, {var}_buf) < 0)
-     {{ Print("CopyBuffer {var} failed"); return; }}""")
+                    lines.append(
+                        f"   double {var}_buf[];\n"
+                        f"   ArraySetAsSeries({var}_buf, true);\n"
+                        f"   if(CopyBuffer(handle_{n}, {buf_idx}, 0, 3, {var}_buf) < 0)\n"
+                        f"     {{ Print(\"CopyBuffer {var} failed\"); return; }}"
+                    )
             else:
-                buf_idx = info.get("buffer", 0)
-                lines.append(f"""   double {n}_buf[];
-   ArraySetAsSeries({n}_buf, true);
-   if(CopyBuffer(handle_{n}, {buf_idx}, 0, 3, {n}_buf) < 0)
-     {{ Print("CopyBuffer {n} failed"); return; }}""")
+                lines.append(
+                    f"   double {n}_buf[];\n"
+                    f"   ArraySetAsSeries({n}_buf, true);\n"
+                    f"   if(CopyBuffer(handle_{n}, {info.get('buffer',0)}, 0, 3, {n}_buf) < 0)\n"
+                    f"     {{ Print(\"CopyBuffer {n} failed\"); return; }}"
+                )
         return "\n".join(lines) or "   // No buffers to copy"
 
     def _build_current_values(self, indicators: list) -> str:
         seen  = set()
-        lines = ["   // [0] = current bar   [1] = previous bar"]
+        lines = ["   // [0]=current bar  [1]=previous bar"]
         for ind in indicators:
             n    = ind["name"]
             info = ind["info"]
@@ -426,27 +547,32 @@ class PY2MQL5Converter:
         return "\n".join(lines)
 
     def _build_input_params(self, indicators: list) -> str:
-        seen  = set()
-        lines = []
+        seen, lines = set(), []
         for ind in indicators:
-            n = ind["name"]
-            p = ind["params"]
+            n    = ind["name"]
+            p    = ind["params"]
+            func = ind["info"].get("mql5_func", "")
             if n in seen:
                 continue
             seen.add(n)
-            func = ind["info"].get("mql5_func", "")
             if func == "iMACD":
-                lines.append(f"input int    macd_fast    = {p.get('fast',12)};   // MACD fast period")
-                lines.append(f"input int    macd_slow    = {p.get('slow',26)};   // MACD slow period")
-                lines.append(f"input int    macd_signal  = {p.get('signal',9)}; // MACD signal period")
+                lines += [
+                    f"input int    macd_fast   = {p.get('fast',12)};   // MACD fast period",
+                    f"input int    macd_slow   = {p.get('slow',26)};   // MACD slow period",
+                    f"input int    macd_signal = {p.get('signal',9)}; // MACD signal period",
+                ]
             elif func == "iBands":
-                lines.append(f"input int    bb_period    = {p.get('period',20)};  // Bollinger period")
-                lines.append(f"input double bb_deviation = {p.get('deviation',2.0)};  // Bollinger deviation")
+                lines += [
+                    f"input int    bb_period    = {p.get('period',20)};  // Bollinger period",
+                    f"input double bb_deviation = {p.get('deviation',2.0)};  // Bollinger deviation",
+                ]
             elif func == "iStochastic":
-                lines.append(f"input int    stoch_k      = {p.get('k_period',14)};  // Stoch K period")
-                lines.append(f"input int    stoch_d      = {p.get('d_period',3)};   // Stoch D period")
+                lines += [
+                    f"input int    stoch_k = {p.get('k_period',14)};  // Stoch K period",
+                    f"input int    stoch_d = {p.get('d_period',3)};   // Stoch D period",
+                ]
             else:
-                lines.append(f"input int    {n}_period   = {p.get('period',14)};  // {n.upper()} period")
+                lines.append(f"input int    {n}_period = {p.get('period',14)};  // {n.upper()} period")
         lines += [
             "input double risk_pct      = 1.0;  // Risk % per trade",
             "input double sl_multiplier = 1.5;  // Stop Loss ATR multiplier",
@@ -454,25 +580,31 @@ class PY2MQL5Converter:
         ]
         return "\n".join(lines)
 
-    # ── ENTRY / EXIT LOGIC ─────────────────────────────────────────
-    def _build_entry_logic(self, code: str, patterns: list, indicators: list) -> str:
+    # ── ENTRY LOGIC (dictionary patterns) ──────────────────────────
+    def _build_entry(self, code: str, patterns: list, indicators: list) -> str:
         has_long  = "has_long"  in patterns
         has_short = "has_short" in patterns
         lines     = ["   //--- Entry Logic"]
+        names     = [i["name"] for i in indicators]
 
-        ind_names = [i["name"] for i in indicators]
+        # No ATR warning + fallback
+        if "atr" not in names:
+            lines += [
+                "   // WARNING: No ATR detected — add ta.atr() for dynamic SL/TP",
+                "   double atr_cur = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 100; // fallback",
+            ]
 
-        # RSI overbought/oversold
-        if ("overbought" in patterns or "oversold" in patterns) and "rsi" in ind_names:
-            ob = self._extract_threshold(code, "overbought", 70)
-            os_ = self._extract_threshold(code, "oversold", 30)
+        # ── RSI ──
+        if ("overbought" in patterns or "oversold" in patterns) and "rsi" in names:
+            ob  = self._get_threshold(code, "overbought", 70)
+            os_ = self._get_threshold(code, "oversold",   30)
             if has_long or "oversold" in patterns:
                 lines += [
                     f"   if(!in_position && rsi_cur < {os_} && rsi_prev >= {os_})",
                     "     {",
                     "      double sl = CalcSL(true, atr_cur, sl_multiplier);",
                     "      double tp = CalcTP(true, atr_cur, tp_multiplier);",
-                    f"      trade.Buy(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, \"RSI Oversold Buy\");",
+                    f'      trade.Buy(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, "RSI Oversold Buy");',
                     "     }",
                 ]
             if has_short or "overbought" in patterns:
@@ -481,179 +613,222 @@ class PY2MQL5Converter:
                     "     {",
                     "      double sl = CalcSL(false, atr_cur, sl_multiplier);",
                     "      double tp = CalcTP(false, atr_cur, tp_multiplier);",
-                    f"      trade.Sell(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, \"RSI Overbought Sell\");",
+                    f'      trade.Sell(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, "RSI Overbought Sell");',
                     "     }",
                 ]
 
-        # MA crossover
-        elif "crossover" in patterns and any(x in ind_names for x in ["ema", "sma", "wma"]):
-            ma_inds = [n for n in ind_names if n in ["ema", "sma", "wma", "dema", "tema"]]
-            if len(ma_inds) >= 2:
-                fast, slow = ma_inds[0], ma_inds[1]
+        # ── MA crossover (BUG 2 FIX: uses actual detected handle names) ──
+        elif "crossover" in patterns:
+            ma_names = [i["name"] for i in indicators if i["info"].get("mql5_func") == "iMA"]
+            if len(ma_names) >= 2:
+                fast, slow = ma_names[0], ma_names[1]
                 lines += [
-                    f"   // Golden cross: {fast} crosses above {slow}",
+                    f"   // Golden cross: {fast} above {slow}",
                     f"   if(!in_position && {fast}_cur > {slow}_cur && {fast}_prev <= {slow}_prev)",
                     "     {",
                     "      double sl = CalcSL(true, atr_cur, sl_multiplier);",
                     "      double tp = CalcTP(true, atr_cur, tp_multiplier);",
-                    f"      trade.Buy(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, \"MA Cross Buy\");",
+                    f'      trade.Buy(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, "MA Cross Buy");',
                     "     }",
-                    f"   // Death cross: {fast} crosses below {slow}",
+                    f"   // Death cross: {fast} below {slow}",
                     f"   if(!in_position && {fast}_cur < {slow}_cur && {fast}_prev >= {slow}_prev)",
                     "     {",
                     "      double sl = CalcSL(false, atr_cur, sl_multiplier);",
                     "      double tp = CalcTP(false, atr_cur, tp_multiplier);",
-                    f"      trade.Sell(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, \"MA Cross Sell\");",
+                    f'      trade.Sell(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, "MA Cross Sell");',
                     "     }",
                 ]
             else:
-                lines.append("   // TODO: Only one MA detected — add second MA for crossover")
+                lines.append("   // TODO: Crossover detected but only one MA found — add Groq key for AI translation")
 
-        # MACD crossover
-        elif "macd" in ind_names:
+        # ── MACD ──
+        elif "macd" in names:
             lines += [
-                "   // MACD crosses above signal → Buy",
+                "   // MACD crosses above signal -> Buy",
                 "   if(!in_position && macd_macd_cur > macd_signal_cur && macd_macd_prev <= macd_signal_prev)",
                 "     {",
                 "      double sl = CalcSL(true, atr_cur, sl_multiplier);",
                 "      double tp = CalcTP(true, atr_cur, tp_multiplier);",
-                "      trade.Buy(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, \"MACD Buy\");",
+                '      trade.Buy(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, "MACD Buy");',
                 "     }",
-                "   // MACD crosses below signal → Sell",
+                "   // MACD crosses below signal -> Sell",
                 "   if(!in_position && macd_macd_cur < macd_signal_cur && macd_macd_prev >= macd_signal_prev)",
                 "     {",
                 "      double sl = CalcSL(false, atr_cur, sl_multiplier);",
                 "      double tp = CalcTP(false, atr_cur, tp_multiplier);",
-                "      trade.Sell(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, \"MACD Sell\");",
+                '      trade.Sell(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, "MACD Sell");',
                 "     }",
             ]
 
-        # Bollinger Band breakout
-        elif "bbands" in ind_names:
+        # ── Bollinger (BUG 1 FIX: close_price from iClose, not close_buf) ──
+        elif "bbands" in names:
             lines += [
-                "   // Price closes below lower band → Buy (mean reversion)",
-                "   if(!in_position && close_buf[0] < bbands_lower_cur)",
+                "   // Price below lower band -> Buy (mean reversion)",
+                "   if(!in_position && close_price < bbands_lower_cur)",
                 "     {",
                 "      double sl = CalcSL(true, atr_cur, sl_multiplier);",
                 "      double tp = CalcTP(true, atr_cur, tp_multiplier);",
-                "      trade.Buy(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, \"BB Lower Buy\");",
+                '      trade.Buy(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, "BB Lower Buy");',
                 "     }",
-                "   // Price closes above upper band → Sell (mean reversion)",
-                "   if(!in_position && close_buf[0] > bbands_upper_cur)",
+                "   // Price above upper band -> Sell (mean reversion)",
+                "   if(!in_position && close_price > bbands_upper_cur)",
                 "     {",
                 "      double sl = CalcSL(false, atr_cur, sl_multiplier);",
                 "      double tp = CalcTP(false, atr_cur, tp_multiplier);",
-                "      trade.Sell(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, \"BB Upper Sell\");",
+                '      trade.Sell(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, "BB Upper Sell");',
                 "     }",
             ]
 
-        else:
+        # ── Stochastic ──
+        elif "stoch" in names:
             lines += [
-                "   // TODO: Entry logic could not be auto-detected",
-                "   // Common patterns: RSI overbought/oversold, MA crossover, MACD cross",
-                "   // Add your entry condition below:",
-                "   // if(!in_position && <your_condition>)",
-                "   //   { trade.Buy(lot, _Symbol, 0, sl, tp, \"Signal\"); }",
+                "   if(!in_position && stoch_k_cur < 20 && stoch_k_prev >= 20)",
+                "     {",
+                "      double sl = CalcSL(true, atr_cur, sl_multiplier);",
+                "      double tp = CalcTP(true, atr_cur, tp_multiplier);",
+                '      trade.Buy(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, "Stoch Buy");',
+                "     }",
+                "   if(!in_position && stoch_k_cur > 80 && stoch_k_prev <= 80)",
+                "     {",
+                "      double sl = CalcSL(false, atr_cur, sl_multiplier);",
+                "      double tp = CalcTP(false, atr_cur, tp_multiplier);",
+                '      trade.Sell(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, "Stoch Sell");',
+                "     }",
             ]
 
-        # Add ATR buffer for SL/TP if not already detected
-        if "atr" not in [i["name"] for i in indicators]:
-            lines.insert(1, "   // Note: Add ta.atr to your Python code for dynamic SL/TP")
+        # ── CCI ──
+        elif "cci" in names:
+            lines += [
+                "   if(!in_position && cci_cur < -100 && cci_prev >= -100)",
+                "     {",
+                "      double sl = CalcSL(true, atr_cur, sl_multiplier);",
+                "      double tp = CalcTP(true, atr_cur, tp_multiplier);",
+                '      trade.Buy(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, "CCI Buy");',
+                "     }",
+                "   if(!in_position && cci_cur > 100 && cci_prev <= 100)",
+                "     {",
+                "      double sl = CalcSL(false, atr_cur, sl_multiplier);",
+                "      double tp = CalcTP(false, atr_cur, tp_multiplier);",
+                '      trade.Sell(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, "CCI Sell");',
+                "     }",
+            ]
+
+        # ── ADX ──
+        elif "adx" in names:
+            lines += [
+                "   // ADX > 25 confirms trend — trade in direction of DI crossover",
+                "   if(!in_position && adx_adx_cur > 25 && adx_plus_di_cur > adx_minus_di_cur && adx_plus_di_prev <= adx_minus_di_prev)",
+                "     {",
+                "      double sl = CalcSL(true, atr_cur, sl_multiplier);",
+                "      double tp = CalcTP(true, atr_cur, tp_multiplier);",
+                '      trade.Buy(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, "ADX Buy");',
+                "     }",
+                "   if(!in_position && adx_adx_cur > 25 && adx_minus_di_cur > adx_plus_di_cur && adx_minus_di_prev <= adx_plus_di_prev)",
+                "     {",
+                "      double sl = CalcSL(false, atr_cur, sl_multiplier);",
+                "      double tp = CalcTP(false, atr_cur, tp_multiplier);",
+                '      trade.Sell(NormalizeDouble(AccountInfoDouble(ACCOUNT_BALANCE)*risk_pct/10000,2), _Symbol, 0, sl, tp, "ADX Sell");',
+                "     }",
+            ]
+
+        # ── Unknown: hand to Groq ──
+        else:
+            lines += [
+                "   // TODO: Pattern not in dictionary",
+                "   // Groq AI will translate if API key is set",
+                "   // Otherwise add entry condition manually:",
+                '   // if(!in_position && <condition>) { trade.Buy(lot, _Symbol, 0, sl, tp, "Buy"); }',
+            ]
 
         return "\n".join(lines)
 
-    def _build_exit_logic(self, code: str, patterns: list, indicators: list) -> str:
-        lines = [
-            "   //--- Exit Logic",
-            "   // SL and TP are set at entry — positions close automatically",
-            "   // Add custom exit conditions here if needed:",
+    def _build_exit(self) -> str:
+        return "\n".join([
+            "   //--- Exit Logic (SL/TP set at entry handle automatic close)",
+            "   // Add custom exits here if needed:",
             "   // if(in_position && <exit_condition>)",
             "   //   { trade.PositionClose(_Symbol); }",
-        ]
-        return "\n".join(lines)
+        ])
 
-    def _extract_threshold(self, code: str, kind: str, default: int) -> int:
+    def _get_threshold(self, code: str, kind: str, default: int) -> int:
         if kind == "overbought":
-            for pat in [r'>\s*(\d+)', r'overbought\s*=\s*(\d+)']:
-                m = re.search(pat, code)
-                if m and 60 < int(m.group(1)) < 100:
-                    return int(m.group(1))
+            m = re.search(r'>\s*(\d+)', code)
+            if m and 60 < int(m.group(1)) < 100:
+                return int(m.group(1))
         else:
-            for pat in [r'<\s*(\d+)', r'oversold\s*=\s*(\d+)']:
-                m = re.search(pat, code)
-                if m and 0 < int(m.group(1)) < 50:
-                    return int(m.group(1))
+            m = re.search(r'<\s*(\d+)', code)
+            if m and 0 < int(m.group(1)) < 50:
+                return int(m.group(1))
         return default
 
-    # ── GROQ AI ────────────────────────────────────────────────────
-    def _groq_translate(self, python_code: str, indicators: list, patterns: list) -> Optional[dict]:
+    # ── HYBRID GROQ LAYER ─────────────────────────────────────────
+    def _groq_fill(self, code: str, indicators: list,
+                   patterns: list, unknown: list) -> Optional[dict]:
         if not self.groq_client:
             return None
-        ind_names = [i["name"] for i in indicators]
-        prompt = f"""You are a Python to MQL5 expert.
-Convert the entry/exit logic of this Python trading strategy to MQL5.
+        names = [i["name"] for i in indicators]
+        avail = ", ".join([f"{n}_cur, {n}_prev" for n in names])
+        prompt = f"""You are a Python to MQL5 expert transpiler.
 
-Python code:
+Python strategy:
 ```python
-{python_code[:2000]}
+{code[:2000]}
 ```
 
-Detected indicators: {ind_names}
-Available MQL5 variables (already declared):
-- {" ".join([f"{i['name']}_cur, {i['name']}_prev" for i in indicators])}
+Already translated by dictionary: {names}
+Unknown indicators needing your help: {unknown}
+
+Available MQL5 variables:
+- {avail}
+- close_price (current close via iClose)
 - in_position (bool)
 - trade.Buy(lot, _Symbol, 0, sl, tp, "comment")
 - trade.Sell(lot, _Symbol, 0, sl, tp, "comment")
 - trade.PositionClose(_Symbol)
-- CalcSL(is_buy, atr_cur, multiplier) → returns SL price
-- CalcTP(is_buy, atr_cur, multiplier) → returns TP price
+- CalcSL(is_buy, atr_cur, multiplier) returns SL price
+- CalcTP(is_buy, atr_cur, multiplier) returns TP price
 
 Rules:
-- [0] = current bar (most recent)
-- Use && not 'and', || not 'or'
-- Pure MQL5 only
-- Return ONLY valid JSON: {{"entry": "mql5 code here", "exit": "mql5 code here"}}
-- No markdown, no explanation"""
+- [0] = current bar. Use && not 'and'. Pure MQL5 only.
+- Return ONLY valid JSON no markdown:
+{{"entry":"mql5 entry code","exit":"mql5 exit code","custom_indicators":{{"declarations":"","init":"","buffers":"","values":""}}}}"""
+
         try:
             from groq import Groq
-            client = Groq(api_key=self.groq_key)
-            resp   = client.chat.completions.create(
+            resp = Groq(api_key=self.groq_key).chat.completions.create(
                 model="llama3-70b-8192",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.1, max_tokens=800
+                temperature=0.1, max_tokens=1200
             )
-            content = resp.choices[0].message.content.strip()
-            content = re.sub(r"```json|```", "", content).strip()
+            content = re.sub(r"```json|```", "", resp.choices[0].message.content).strip()
             return json.loads(content)
         except Exception:
             return None
 
-    # ── VALIDATION & SCORING ───────────────────────────────────────
+    # ── VALIDATION + SCORE ─────────────────────────────────────────
     def _validate(self, result: ConversionResult):
         code = result.mql5_code
-        if "CopyBuffer" in code:
-            cb = code.count("CopyBuffer")
-            as_ = code.count("ArraySetAsSeries")
-            if cb != as_:
-                result.warnings.append(f"CopyBuffer ({cb}) ≠ ArraySetAsSeries ({as_}) — check output")
-        if "TODO" in code:
-            result.warnings.append("Some logic needs manual review — find TODO comments in output")
+        if "close_buf[0]" in code:
+            result.errors.append("close_buf used but not declared — use close_price instead")
         if "iloc" in code or "pandas" in code.lower():
-            result.errors.append("Python syntax still in output — check TODO sections")
+            result.errors.append("Python syntax still present in output")
+        if "// TODO" in code:
+            result.warnings.append("Some logic needs manual review — find TODO in output")
 
-    def _score(self, indicators, patterns, result) -> int:
-        score = 90
+    def _score(self, indicators, patterns, result, unknown) -> int:
+        score = 95
         score -= len(result.errors)   * 25
         score -= len(result.warnings) * 5
+        score -= len(unknown)         * 10
         score += min(len(indicators)  * 3, 15)
-        known = {"crossover", "crossunder", "overbought", "oversold"}
-        score += sum(5 for p in patterns if p in known)
+        for p in patterns:
+            if p in {"crossover", "crossunder", "overbought", "oversold"}:
+                score += 5
         if result.ai_used:
-            score -= 5
+            score -= 3
         return max(0, min(100, score))
 
 
-# ═══════════════════════════════════════════════════════════════════
 # STREAMLIT UI
 # ═══════════════════════════════════════════════════════════════════
 
