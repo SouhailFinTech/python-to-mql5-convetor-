@@ -696,11 +696,22 @@ st.markdown("""
 
 # ── SIDEBAR ────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### ⚙️ Settings")
-    groq_key = st.text_input("Groq API Key", type="password",
-                              placeholder="gsk_... (free at console.groq.com)",
-                              help="Optional — used for complex logic only")
-    ea_name  = st.text_input("EA Name", value="MyStrategy_EA")
+    st.markdown("### Settings")
+
+    # Secrets-first: set GROQ_API_KEY in Streamlit Cloud > Manage App > Secrets
+    # Fallback: user pastes their own key (local dev / power users)
+    try:
+        groq_key = st.secrets["GROQ_API_KEY"]
+        st.success("Groq AI connected", icon="✅")
+    except Exception:
+        groq_key = st.text_input(
+            "Groq API Key (optional)",
+            type="password",
+            placeholder="gsk_... free at console.groq.com",
+            help="Needed only for complex custom logic. Basic strategies work without it."
+        )
+
+    ea_name = st.text_input("EA Name", value="MyStrategy_EA")
 
     st.markdown("---")
     st.markdown("### ✅ Supported Indicators")
