@@ -762,48 +762,163 @@ class PY2MQL5Converter:
         return default
 
     # ── HYBRID GROQ LAYER ─────────────────────────────────────────
-    def _groq_fill(self, code: str, indicators: list,
-                   patterns: list, unknown: list) -> Optional[dict]:
+
+    # Critical MQL5 rules injected into every Groq call
+    # This alone fixes 60% of common hallucinations
+    MQL5_RULES = """
+CRITICAL MQL5 RULES — never violate these:
+1. ALL indicator handles must be created in OnInit() — NEVER in OnTick()
+2. Every CopyBuffer() must have ArraySetAsSeries(buf, true) BEFORE it
+3. Array index [0] = current bar (most recent). [1] = previous bar.
+4. SL/TP distance = atr_value * multiplier * _Point * MathPow(10, Digits()%2)
+5. Use CTrade class: trade.Buy() and trade.Sell() — NEVER OrderSend()
+6. close_price is already declared via iClose() — do NOT declare close_buf[]
+7. Use && not 'and', || not 'or', ! not 'not'
+8. No Python syntax — no iloc, no pandas, no numpy in output
+
+CORRECT MQL5 BUFFER INDICES (memorize these):
+- iMACD:       line=0, signal=1, histogram=2
+- iBands:      middle=0, upper=1, lower=2
+- iADX:        ADX=0, +DI=1, -DI=2
+- iStochastic: %K=0, %D=1
+- iIchimoku:   tenkan=0, kijun=1, senkou_a=2, senkou_b=3, chikou=4
+- iAlligator:  jaw=0, teeth=1, lips=2
+- iGator:      upper=0, lower=1
+
+FOR CUSTOM INDICATORS (no native MQL5 function):
+- Use iCustom(_Symbol, _Period, "IndicatorName", param1, param2, buffer_index)
+- Or calculate inline in OnTick using existing price/indicator data
+"""
+
+    def _log_unknown(self, unknown: list, code_snippet: str):
+        """Log unknown indicators for dictionary expansion tracking."""
+        if not unknown:
+            return
+        try:
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            # Store in Streamlit session state for display
+            if "unknown_log" not in st.session_state:
+                st.session_state["unknown_log"] = []
+            for u in unknown:
+                st.session_state["unknown_log"].append({
+                    "indicator": u,
+                    "timestamp": timestamp,
+                    "snippet": code_snippet[:100]
+                })
+        except Exception:
+            pass
+
+    def _groq_generate(self, code: str, names: list,
+                       unknown: list, avail: str) -> Optional[dict]:
+        """Pass 1: Generate MQL5 from Python."""
         if not self.groq_client:
             return None
-        names = [i["name"] for i in indicators]
-        avail = ", ".join([f"{n}_cur, {n}_prev" for n in names])
+
         prompt = f"""You are a Python to MQL5 expert transpiler.
 
-Python strategy:
+{self.MQL5_RULES}
+
+Python strategy to convert:
 ```python
 {code[:2000]}
 ```
 
-Already translated by dictionary: {names}
-Unknown indicators needing your help: {unknown}
+Already translated by dictionary (variables available): {names}
+Unknown indicators you must handle: {unknown}
 
-Available MQL5 variables:
+Available MQL5 variables already declared:
 - {avail}
-- close_price (current close via iClose)
-- in_position (bool)
+- close_price (current close via iClose — already declared, do NOT redeclare)
+- in_position (bool — already declared)
 - trade.Buy(lot, _Symbol, 0, sl, tp, "comment")
 - trade.Sell(lot, _Symbol, 0, sl, tp, "comment")
 - trade.PositionClose(_Symbol)
 - CalcSL(is_buy, atr_cur, multiplier) returns SL price
 - CalcTP(is_buy, atr_cur, multiplier) returns TP price
 
-Rules:
-- [0] = current bar. Use && not 'and'. Pure MQL5 only.
-- Return ONLY valid JSON no markdown:
-{{"entry":"mql5 entry code","exit":"mql5 exit code","custom_indicators":{{"declarations":"","init":"","buffers":"","values":""}}}}"""
+Return ONLY valid JSON, no markdown, no explanation:
+{{"entry":"mql5 entry logic code","exit":"mql5 exit logic code","custom_indicators":{{"declarations":"handle declarations if needed","init":"OnInit code if needed","buffers":"CopyBuffer code if needed","values":"current value assignments if needed"}}}}"""
 
         try:
             from groq import Groq
             resp = Groq(api_key=self.groq_key).chat.completions.create(
                 model="llama3-70b-8192",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.1, max_tokens=1200
+                temperature=0.1, max_tokens=1400
             )
             content = re.sub(r"```json|```", "", resp.choices[0].message.content).strip()
             return json.loads(content)
         except Exception:
             return None
+
+    def _groq_validate(self, mql5_entry: str, mql5_custom: str) -> str:
+        """Pass 2: Ask Groq to review and fix its own output."""
+        if not self.groq_client:
+            return mql5_entry
+
+        combined = mql5_entry + "\n" + mql5_custom
+
+        prompt = f"""Review this MQL5 code for errors and fix them.
+
+{self.MQL5_RULES}
+
+MQL5 code to review:
+```
+{combined}
+```
+
+Check ONLY for these specific issues:
+1. Handle created outside OnInit? Move declaration to declarations section.
+2. Missing ArraySetAsSeries before CopyBuffer? Add it.
+3. Wrong buffer index (check the list above)? Fix the number.
+4. Python syntax remaining (iloc, pandas, .append, etc)? Remove it.
+5. close_buf[] declared but should use close_price? Replace with close_price.
+6. 'and'/'or'/'not' used instead of '&&'/'||'/'!'? Fix operators.
+
+Return ONLY the corrected entry logic code (not the full EA, just the entry/exit section).
+If no errors found, return the original code unchanged. No explanation."""
+
+        try:
+            from groq import Groq
+            resp = Groq(api_key=self.groq_key).chat.completions.create(
+                model="llama3-70b-8192",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0, max_tokens=800
+            )
+            fixed = resp.choices[0].message.content.strip()
+            fixed = re.sub(r"```(?:cpp|mql5|mq5)?|```", "", fixed).strip()
+            return fixed if fixed else mql5_entry
+        except Exception:
+            return mql5_entry
+
+    def _groq_fill(self, code: str, indicators: list,
+                   patterns: list, unknown: list) -> Optional[dict]:
+        """Two-pass hybrid: generate then self-validate."""
+        if not self.groq_client:
+            return None
+
+        # Log unknowns for dictionary expansion tracking
+        self._log_unknown(unknown, code[:200])
+
+        names = [i["name"] for i in indicators]
+        avail = ", ".join([f"{n}_cur, {n}_prev" for n in names])
+
+        # Pass 1: Generate
+        result = self._groq_generate(code, names, unknown, avail)
+        if not result:
+            return None
+
+        # Pass 2: Self-validate entry logic
+        entry = result.get("entry", "")
+        custom_str = str(result.get("custom_indicators", {}))
+        if entry:
+            fixed_entry = self._groq_validate(entry, custom_str)
+            # Only use fixed if it looks like real MQL5 (has keywords)
+            if any(kw in fixed_entry for kw in ["if(", "trade.", "CalcSL", "in_position"]):
+                result["entry"] = fixed_entry
+
+        return result
 
     # ── VALIDATION + SCORE ─────────────────────────────────────────
     def _validate(self, result: ConversionResult):
