@@ -1,18 +1,23 @@
 """
 PY2MQL5 — Python to MQL5 Converter
-Single-file version — Streamlit Cloud ready
-Hybrid: Dictionary (deterministic) + Groq AI (edge cases only)
+All-in-one: Converter + Compiler + Strategy Tester + UI
+- Streamlit Cloud: conversion only (no Windows tools)
+- Local Windows: full validation (MetaEditor compile + MT5 Strategy Tester)
 """
 
 import streamlit as st
 import ast
 import re
 import json
+import os
+import glob
+import time
+import platform
+import subprocess
+import tempfile
+from pathlib import Path
 from typing import Optional
 
-# ═══════════════════════════════════════════════════════════════════
-# INDICATOR MAP — your moat. Deterministic. Zero AI. Always correct.
-# ═══════════════════════════════════════════════════════════════════
 
 INDICATOR_MAP = {
     # ── Moving Averages ─────────────────────────────────────────────
@@ -944,6 +949,683 @@ If no errors found, return the original code unchanged. No explanation."""
         return max(0, min(100, score))
 
 
+
+
+# ═══════════════════════════════════════════════════════════════════
+# MQL5 COMPILER — MetaEditor CLI (Windows only, completely free)
+# ═══════════════════════════════════════════════════════════════════
+
+class MQL5Compiler:
+    def __init__(self, metaeditor_path: str = None, experts_folder: str = None):
+        self.metaeditor  = metaeditor_path  or self._find_metaeditor()
+        self.experts_dir = experts_folder   or self._find_experts_folder()
+
+    # ── AUTO DISCOVERY ─────────────────────────────────────────────
+    def _find_metaeditor(self) -> Optional[str]:
+        """Find metaeditor64.exe automatically on Windows."""
+        search_paths = [
+            r"C:\Program Files\MetaTrader 5\metaeditor64.exe",
+            r"C:\Program Files (x86)\MetaTrader 5\metaeditor64.exe",
+        ]
+        # Also search AppData (broker-specific installs)
+        appdata = os.environ.get("APPDATA", "")
+        if appdata:
+            pattern = os.path.join(appdata, "MetaQuotes", "Terminal", "*", "..\\metaeditor64.exe")
+            found = glob.glob(
+                os.path.join(os.path.dirname(appdata), "**", "metaeditor64.exe"),
+                recursive=True
+            )
+            search_paths.extend(found[:3])
+
+        for path in search_paths:
+            if os.path.exists(path):
+                return path
+
+        # Deep search C:\ (slower but thorough)
+        try:
+            result = subprocess.run(
+                ["where", "/r", "C:\\", "metaeditor64.exe"],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.stdout.strip():
+                return result.stdout.strip().split("\n")[0].strip()
+        except Exception:
+            pass
+
+        return None
+
+    def _find_experts_folder(self) -> Optional[str]:
+        """Find MT5 MQL5/Experts folder automatically."""
+        appdata = os.environ.get("APPDATA", "")
+        if not appdata:
+            return None
+
+        # Search for Experts folders
+        pattern = os.path.join(appdata, "MetaQuotes", "Terminal", "*", "MQL5", "Experts")
+        folders = glob.glob(pattern)
+        if folders:
+            # Prefer the most recently modified
+            return max(folders, key=os.path.getmtime)
+
+        return None
+
+    # ── MAIN COMPILE METHOD ────────────────────────────────────────
+    def compile(self, mql5_code: str, ea_name: str = "PY2MQL5_Test") -> dict:
+        """
+        Compile MQL5 code and return result dict.
+        
+        Returns:
+            {
+                "compiled": bool,
+                "errors": [str],
+                "warnings": [str],
+                "error_count": int,
+                "warning_count": int,
+                "ex5_created": bool,
+                "metaeditor_found": bool,
+                "experts_folder": str,
+            }
+        """
+        result = {
+            "compiled":          False,
+            "errors":            [],
+            "warnings":          [],
+            "error_count":       0,
+            "warning_count":     0,
+            "ex5_created":       False,
+            "metaeditor_found":  bool(self.metaeditor),
+            "experts_folder":    self.experts_dir or "not found",
+        }
+
+        # Check MetaEditor exists
+        if not self.metaeditor or not os.path.exists(self.metaeditor):
+            result["errors"].append(
+                "MetaEditor not found. Make sure MT5 is installed. "
+                "Pass metaeditor_path manually to MQL5Compiler()."
+            )
+            return result
+
+        # Use experts folder or temp folder
+        if self.experts_dir and os.path.exists(self.experts_dir):
+            work_dir = self.experts_dir
+        else:
+            work_dir = tempfile.gettempdir()
+
+        # Write .mq5 file
+        safe_name = re.sub(r'[^\w]', '_', ea_name)
+        mq5_path = os.path.join(work_dir, f"{safe_name}.mq5")
+        ex5_path = mq5_path.replace(".mq5", ".ex5")
+        log_path = mq5_path.replace(".mq5", "_compile.log")
+
+        try:
+            with open(mq5_path, "w", encoding="utf-8") as f:
+                f.write(mql5_code)
+        except Exception as e:
+            result["errors"].append(f"Could not write .mq5 file: {e}")
+            return result
+
+        # Remove old .ex5 and log if they exist
+        for p in [ex5_path, log_path]:
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+
+        # Run MetaEditor compiler
+        try:
+            proc = subprocess.run(
+                [
+                    self.metaeditor,
+                    f"/compile:{mq5_path}",
+                    f"/log:{log_path}",
+                    "/s",   # silent mode
+                ],
+                capture_output=True,
+                timeout=45,
+            )
+        except subprocess.TimeoutExpired:
+            result["errors"].append("MetaEditor compile timed out (>45s)")
+            return result
+        except Exception as e:
+            result["errors"].append(f"MetaEditor execution failed: {e}")
+            return result
+
+        # Check if .ex5 was created (most reliable success indicator)
+        time.sleep(0.5)  # small delay for file system
+        result["ex5_created"] = os.path.exists(ex5_path)
+
+        # Parse log file
+        errors, warnings = self._parse_log(log_path)
+        result["errors"]        = errors
+        result["warnings"]      = warnings
+        result["error_count"]   = len(errors)
+        result["warning_count"] = len(warnings)
+
+        # Compiled = .ex5 exists AND no errors in log
+        result["compiled"] = result["ex5_created"] and len(errors) == 0
+
+        # Cleanup temp files (keep .ex5 for MT5 to use)
+        try:
+            if os.path.exists(log_path):
+                os.remove(log_path)
+        except Exception:
+            pass
+
+        return result
+
+    def _parse_log(self, log_path: str) -> tuple:
+        """
+        Parse MetaEditor log file.
+        MT5 writes logs in UTF-16 LE encoding — critical detail.
+        """
+        errors   = []
+        warnings = []
+
+        if not os.path.exists(log_path):
+            return errors, warnings
+
+        # Try UTF-16 first (MT5 default), fallback to UTF-8
+        for encoding in ["utf-16", "utf-16-le", "utf-8", "latin-1"]:
+            try:
+                with open(log_path, encoding=encoding) as f:
+                    lines = f.readlines()
+                break
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        else:
+            return errors, warnings
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            ll = line.lower()
+
+            # Skip header/info lines
+            if any(skip in ll for skip in ["metaeditor", "copyright", "compiling"]):
+                continue
+
+            if "error" in ll:
+                # Clean up the error message
+                clean = self._clean_log_line(line)
+                if clean:
+                    errors.append(clean)
+            elif "warning" in ll:
+                clean = self._clean_log_line(line)
+                if clean:
+                    warnings.append(clean)
+
+        return errors, warnings
+
+    def _clean_log_line(self, line: str) -> str:
+        """Extract the useful part of a log line."""
+        # Format: C:\path\file.mq5(123,45) : error(42): description
+        # We want: line 123: error(42): description
+        m = re.search(r'\((\d+),\d+\)\s*:\s*(.*)', line)
+        if m:
+            return f"Line {m.group(1)}: {m.group(2).strip()}"
+        # Fallback: return cleaned line
+        clean = re.sub(r'[A-Za-z]:\\[^:]+:', '', line).strip()
+        return clean if len(clean) > 5 else ""
+
+    # ── COMPILE + AUTO FIX LOOP ────────────────────────────────────
+    def compile_and_fix(self, mql5_code: str, ea_name: str,
+                        groq_client=None, max_attempts: int = 3) -> dict:
+        """
+        Compile → if errors → send to Groq for fix → recompile.
+        Up to max_attempts iterations.
+        Returns the best result with attempt count.
+        """
+        best_code   = mql5_code
+        best_result = None
+
+        for attempt in range(1, max_attempts + 1):
+            result = self.compile(best_code, ea_name)
+            result["attempt"] = attempt
+            best_result = result
+
+            if result["compiled"]:
+                result["final_code"] = best_code
+                return result
+
+            # No Groq or last attempt — return as is
+            if not groq_client or attempt == max_attempts:
+                break
+
+            # Send errors to Groq for fix
+            fixed = self._groq_fix(best_code, result["errors"], groq_client)
+            if fixed and fixed != best_code:
+                best_code = fixed
+            else:
+                break  # Groq couldn't improve it
+
+        best_result["final_code"] = best_code
+        return best_result
+
+    def _groq_fix(self, mql5_code: str, errors: list, groq_client) -> Optional[str]:
+        """Ask Groq to fix specific compile errors."""
+        if not errors:
+            return None
+
+        error_list = "\n".join(errors[:5])  # max 5 errors per call
+
+        prompt = f"""Fix these MQL5 compile errors in the code below.
+
+ERRORS TO FIX:
+{error_list}
+
+MQL5 CODE:
+{mql5_code}
+
+RULES:
+- Return ONLY the complete fixed MQL5 code
+- Do not add explanation or markdown
+- Do not change the strategy logic, only fix syntax/structural errors
+- Common fixes: move handle creation to OnInit(), add ArraySetAsSeries(), fix buffer indices"""
+
+        try:
+            resp = groq_client.chat.completions.create(
+                model="llama3-70b-8192",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=2000,
+            )
+            fixed = resp.choices[0].message.content.strip()
+            # Remove markdown code blocks if present
+            fixed = re.sub(r"```(?:cpp|mql5|mq5)?|```", "", fixed).strip()
+            return fixed if len(fixed) > 100 else None
+        except Exception:
+            return None
+
+    # ── STATUS CHECK ───────────────────────────────────────────────
+    def is_available(self) -> dict:
+        """Check if compiler is ready to use."""
+        return {
+            "metaeditor_found":    bool(self.metaeditor and os.path.exists(self.metaeditor or "")),
+            "experts_folder_found": bool(self.experts_dir and os.path.exists(self.experts_dir or "")),
+            "metaeditor_path":     self.metaeditor or "not found",
+            "experts_path":        self.experts_dir or "not found",
+            "ready":               bool(self.metaeditor and os.path.exists(self.metaeditor or "")),
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# MT5 STRATEGY TESTER — pywinauto GUI automation (Windows only, free)
+# pip install pywinauto beautifulsoup4
+# ═══════════════════════════════════════════════════════════════════
+
+class MT5StrategyTester:
+    def __init__(self):
+        self.app    = None
+        self.mt5_win = None
+        self._pywinauto_available = self._check_pywinauto()
+
+    def _check_pywinauto(self) -> bool:
+        try:
+            import pywinauto
+            return True
+        except ImportError:
+            return False
+
+    # ── MAIN RUN METHOD ────────────────────────────────────────────
+    def run_backtest(self,
+                     ea_name:    str,
+                     symbol:     str = "EURUSD",
+                     timeframe:  str = "H1",
+                     date_from:  str = "2023.01.01",
+                     date_to:    str = "2023.12.31",
+                     model:      str = "OHLC") -> dict:
+        """
+        Run a backtest in MT5 Strategy Tester.
+
+        Returns:
+            {
+                "success": bool,
+                "trades": [{"time", "type", "price", "profit"}],
+                "total_trades": int,
+                "net_profit": float,
+                "error": str or None,
+            }
+        """
+        result = {
+            "success":      False,
+            "trades":       [],
+            "total_trades": 0,
+            "net_profit":   0.0,
+            "error":        None,
+        }
+
+        if not self._pywinauto_available:
+            result["error"] = (
+                "pywinauto not installed. Run: pip install pywinauto"
+            )
+            return result
+
+        try:
+            from pywinauto import Application, Desktop
+            from pywinauto.keyboard import send_keys
+
+            # Step 1: Connect to running MT5
+            try:
+                self.app = Application(backend="uia").connect(
+                    title_re=".*MetaTrader 5.*",
+                    timeout=5
+                )
+                self.mt5_win = self.app.top_window()
+            except Exception:
+                result["error"] = (
+                    "MT5 terminal not found. Make sure MT5 is open and logged in."
+                )
+                return result
+
+            # Step 2: Open Strategy Tester
+            self.mt5_win.set_focus()
+            time.sleep(0.5)
+            send_keys("^r")  # Ctrl+R opens Strategy Tester
+            time.sleep(2)
+
+            # Step 3: Find the Tester panel
+            tester = self._get_tester_panel()
+            if not tester:
+                result["error"] = "Could not find Strategy Tester panel"
+                return result
+
+            # Step 4: Configure tester
+            self._set_tester_config(tester, ea_name, symbol, timeframe,
+                                     date_from, date_to, model)
+            time.sleep(1)
+
+            # Step 5: Click Start and wait
+            started = self._click_start(tester)
+            if not started:
+                result["error"] = "Could not click Start button"
+                return result
+
+            # Step 6: Wait for completion (timeout 3 minutes)
+            completed = self._wait_for_completion(tester, timeout=180)
+            if not completed:
+                result["error"] = "Backtest timed out after 3 minutes"
+                return result
+
+            # Step 7: Read HTML report
+            trades = self._read_report()
+            if trades is not None:
+                result["success"]      = True
+                result["trades"]       = trades
+                result["total_trades"] = len(trades)
+                result["net_profit"]   = sum(
+                    float(t.get("profit", 0) or 0) for t in trades
+                )
+
+        except Exception as e:
+            result["error"] = f"Automation error: {e}"
+
+        return result
+
+    # ── TESTER PANEL ───────────────────────────────────────────────
+    def _get_tester_panel(self):
+        """Find the Strategy Tester docked panel."""
+        try:
+            from pywinauto import Desktop
+            # Try finding by title
+            windows = Desktop(backend="uia").windows()
+            for w in windows:
+                try:
+                    if "tester" in w.window_text().lower():
+                        return w
+                except Exception:
+                    continue
+            # Fallback: get child panel from main window
+            return self.mt5_win.child_window(title_re=".*Tester.*")
+        except Exception:
+            return None
+
+    # ── CONFIGURATION ──────────────────────────────────────────────
+    def _set_tester_config(self, tester, ea_name, symbol,
+                            timeframe, date_from, date_to, model):
+        """Fill in Strategy Tester settings."""
+        try:
+            # EA dropdown
+            self._safe_select(tester, "Expert:", ea_name)
+
+            # Symbol
+            self._safe_select(tester, "Symbol:", symbol)
+
+            # Timeframe
+            timeframe_map = {
+                "M1": "1 Minute", "M5": "5 Minutes", "M15": "15 Minutes",
+                "M30": "30 Minutes", "H1": "1 Hour", "H4": "4 Hours",
+                "D1": "Daily", "W1": "Weekly", "MN": "Monthly",
+            }
+            tf_label = timeframe_map.get(timeframe, timeframe)
+            self._safe_select(tester, "Period:", tf_label)
+
+            # Model (OHLC is fastest for signal comparison)
+            model_map = {
+                "OHLC":      "Open prices only",
+                "EVERY_TICK": "Every tick",
+                "1MIN":      "1 minute OHLC",
+            }
+            self._safe_select(tester, "Model:", model_map.get(model, model))
+
+            # Date range
+            self._safe_set_date(tester, "from", date_from)
+            self._safe_set_date(tester, "to",   date_to)
+
+        except Exception:
+            pass  # Best effort — tester might still run with defaults
+
+    def _safe_select(self, parent, label, value):
+        """Safely select a combo box value."""
+        try:
+            combo = parent.child_window(title=label).next()
+            combo.select(value)
+        except Exception:
+            pass
+
+    def _safe_set_date(self, parent, which, date_str):
+        """Set from/to date in tester."""
+        try:
+            # Date format: YYYY.MM.DD
+            field_name = "From:" if which == "from" else "To:"
+            field = parent.child_window(title=field_name).next()
+            field.set_edit_text(date_str)
+        except Exception:
+            pass
+
+    # ── START / WAIT ───────────────────────────────────────────────
+    def _click_start(self, tester) -> bool:
+        """Click the Start button."""
+        try:
+            # Try finding Start button
+            for title in ["Start", "start", "Run"]:
+                try:
+                    btn = tester.child_window(title=title, control_type="Button")
+                    btn.click()
+                    time.sleep(1)
+                    return True
+                except Exception:
+                    continue
+            return False
+        except Exception:
+            return False
+
+    def _wait_for_completion(self, tester, timeout: int = 180) -> bool:
+        """
+        Wait for backtest to complete.
+        Strategy Tester Start button becomes enabled again when done.
+        Progress bar disappears.
+        """
+        deadline = time.time() + timeout
+        check_interval = 2
+
+        while time.time() < deadline:
+            time.sleep(check_interval)
+            try:
+                # Check if progress bar is gone (means completed)
+                progress = tester.child_window(control_type="ProgressBar")
+                if not progress.exists():
+                    time.sleep(1)
+                    return True
+            except Exception:
+                # No progress bar = completed
+                return True
+
+        return False
+
+    # ── READ REPORT ────────────────────────────────────────────────
+    def _read_report(self) -> Optional[list]:
+        """
+        Read the latest MT5 Strategy Tester HTML report.
+        MT5 saves reports automatically after each backtest.
+        """
+        try:
+            from bs4 import BeautifulSoup
+        except ImportError:
+            return self._read_report_without_bs4()
+
+        report_path = self._find_latest_report()
+        if not report_path:
+            return []
+
+        try:
+            # Try different encodings
+            for enc in ["utf-8", "utf-16", "latin-1"]:
+                try:
+                    with open(report_path, encoding=enc) as f:
+                        content = f.read()
+                    break
+                except (UnicodeDecodeError, UnicodeError):
+                    continue
+            else:
+                return []
+
+            soup = BeautifulSoup(content, "html.parser")
+            trades = []
+
+            # MT5 report has a table with trade history
+            tables = soup.find_all("table")
+            for table in tables:
+                rows = table.find_all("tr")
+                for row in rows[1:]:  # skip header
+                    cols = [td.get_text(strip=True) for td in row.find_all("td")]
+                    if len(cols) >= 6:
+                        trade_type = cols[2].lower() if len(cols) > 2 else ""
+                        if "buy" in trade_type or "sell" in trade_type:
+                            trades.append({
+                                "time":   cols[0] if cols else "",
+                                "ticket": cols[1] if len(cols) > 1 else "",
+                                "type":   cols[2] if len(cols) > 2 else "",
+                                "lots":   cols[3] if len(cols) > 3 else "",
+                                "price":  cols[4] if len(cols) > 4 else "",
+                                "profit": self._parse_float(cols[-1]),
+                            })
+            return trades
+
+        except Exception as e:
+            return []
+
+    def _read_report_without_bs4(self) -> list:
+        """Fallback: parse report with regex if bs4 not installed."""
+        report_path = self._find_latest_report()
+        if not report_path:
+            return []
+
+        trades = []
+        try:
+            with open(report_path, encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            # Extract buy/sell rows with regex
+            pattern = r'<tr[^>]*>.*?(\d{4}\.\d{2}\.\d{2}).*?(buy|sell).*?([\d.]+).*?</tr>'
+            matches = re.findall(pattern, content, re.IGNORECASE | re.DOTALL)
+            for m in matches:
+                trades.append({
+                    "time": m[0], "type": m[1].lower(), "profit": 0.0
+                })
+        except Exception:
+            pass
+        return trades
+
+    def _find_latest_report(self) -> Optional[str]:
+        """Find the most recently created MT5 report file."""
+        appdata = os.environ.get("APPDATA", "")
+        patterns = [
+            os.path.join(appdata, "MetaQuotes", "Terminal", "*", "reports", "*.htm*"),
+            os.path.join(appdata, "MetaQuotes", "Terminal", "*", "tester", "*.htm*"),
+            r"C:\Users\*\AppData\Roaming\MetaQuotes\Terminal\*\reports\*.htm*",
+        ]
+        all_reports = []
+        for p in patterns:
+            all_reports.extend(glob.glob(p, recursive=False))
+
+        if not all_reports:
+            return None
+
+        # Return most recently modified
+        return max(all_reports, key=os.path.getmtime)
+
+    def _parse_float(self, s: str) -> float:
+        try:
+            return float(re.sub(r"[^\d.\-]", "", s))
+        except Exception:
+            return 0.0
+
+    # ── SIGNAL COMPARISON ──────────────────────────────────────────
+    @staticmethod
+    def compare_signals(python_signals: list, mt5_trades: list) -> dict:
+        """
+        Compare Python strategy signals vs MT5 backtest trades.
+
+        python_signals: [{"bar": int, "direction": "buy"/"sell"}, ...]
+        mt5_trades:     [{"type": "buy"/"sell", "profit": float}, ...]
+
+        Returns match score 0-100.
+        """
+        if not python_signals and not mt5_trades:
+            return {"score": 100, "verified": True,
+                    "reason": "Both produced no trades"}
+
+        if not python_signals or not mt5_trades:
+            return {"score": 0, "verified": False,
+                    "reason": f"Python: {len(python_signals)} trades, "
+                               f"MT5: {len(mt5_trades)} trades"}
+
+        py_count  = len(python_signals)
+        mt5_count = len(mt5_trades)
+
+        # Count match score (50 points)
+        count_diff  = abs(py_count - mt5_count)
+        count_score = max(0, 50 - (count_diff * 5))
+
+        # Direction sequence match (50 points)
+        py_dirs  = [s.get("direction", s.get("dir", "")) for s in python_signals]
+        mt5_dirs = [
+            "buy"  if "buy"  in t.get("type", "").lower() else
+            "sell" if "sell" in t.get("type", "").lower() else ""
+            for t in mt5_trades
+        ]
+
+        # Compare overlapping portion
+        min_len  = min(len(py_dirs), len(mt5_dirs))
+        matches  = sum(1 for a, b in zip(py_dirs[:min_len], mt5_dirs[:min_len]) if a == b)
+        dir_score = int((matches / min_len * 50)) if min_len > 0 else 0
+
+        total = count_score + dir_score
+
+        return {
+            "score":        total,
+            "verified":     total >= 85,
+            "badge":        "✅ Verified" if total >= 85 else "⚠️ Review needed",
+            "py_trades":    py_count,
+            "mt5_trades":   mt5_count,
+            "count_score":  count_score,
+            "dir_score":    dir_score,
+            "reason":       f"{matches}/{min_len} direction matches, "
+                            f"{py_count} vs {mt5_count} trade count",
+        }
+
+
 # STREAMLIT UI
 # ═══════════════════════════════════════════════════════════════════
 
@@ -1145,6 +1827,76 @@ with col_r:
                 mime="text/plain",
                 use_container_width=True
             )
+
+            # ── COMPILE VALIDATION (Windows only) ──────────────────
+            st.markdown("---")
+            st.markdown('<div class="slbl">Validation Layer</div>', unsafe_allow_html=True)
+
+            import platform
+            is_windows = platform.system() == "Windows"
+
+            if is_windows:
+                try:
+                    # MQL5Compiler defined above
+                    compiler_obj = MQL5Compiler()
+                    status = compiler_obj.is_available()
+                    if status["ready"]:
+                        col_compile, col_test = st.columns(2)
+                        with col_compile:
+                            if st.button("Compile in MetaEditor", use_container_width=True, key="compile_btn"):
+                                with st.spinner("Compiling..."):
+                                    cr = compiler_obj.compile_and_fix(
+                                        result.mql5_code, ea_name,
+                                        groq_client=conv.groq_client,
+                                        max_attempts=3
+                                    )
+                                if cr["compiled"]:
+                                    st.success(f"Compiled clean - 0 errors, {cr['warning_count']} warnings, attempt {cr['attempt']}/3")
+                                    if cr.get("final_code") and cr["final_code"] != result.mql5_code:
+                                        st.info("Auto-fixed during compilation")
+                                        st.download_button(
+                                            "Download Fixed .mq5",
+                                            data=cr["final_code"],
+                                            file_name=f"{ea_name}_fixed.mq5",
+                                            mime="text/plain",
+                                            use_container_width=True,
+                                            key="dl_fixed"
+                                        )
+                                    if cr["warnings"]:
+                                        with st.expander(f"{cr['warning_count']} warnings"):
+                                            for w in cr["warnings"]:
+                                                st.text(w)
+                                else:
+                                    st.error(f"{cr['error_count']} errors remain after {cr['attempt']} fix attempts")
+                                    with st.expander("View errors"):
+                                        for e in cr["errors"]:
+                                            st.code(e, language=None)
+                        with col_test:
+                            st.markdown(
+                                '''<div style="font-family:JetBrains Mono,monospace;font-size:11px;
+                                color:#334155;padding:8px;border:1px dashed #1e1e2e;border-radius:8px">
+                                Strategy Tester automation<br>coming in v0.2<br>(pywinauto)</div>''',
+                                unsafe_allow_html=True
+                            )
+                    else:
+                        st.markdown(
+                            f'''<div style="font-family:JetBrains Mono,monospace;font-size:11px;color:#334155">
+                            MetaEditor not found. Install MT5 or set path in compiler.py<br>
+                            Expected: {status["metaeditor_path"]}</div>''',
+                            unsafe_allow_html=True
+                        )
+                except ImportError:
+                    st.info("compiler.py not found in project folder")
+                except Exception as ex:
+                    st.warning(f"Compiler module error: {ex}")
+            else:
+                st.markdown(
+                    '''<div style="font-family:JetBrains Mono,monospace;font-size:11px;color:#334155">
+                    Compile validation requires Windows + MT5 installed.<br>
+                    Run locally on your Windows machine to enable this feature.</div>''',
+                    unsafe_allow_html=True
+                )
+
         else:
             st.error("Conversion failed — check errors above")
 
